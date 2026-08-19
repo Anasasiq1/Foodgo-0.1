@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   ArrowLeft,
-  Search,
   Minus,
   Plus,
   Check,
@@ -14,6 +13,7 @@ import {
   Star,
   CheckCircle,
   Soup,
+  RotateCcw,
 } from 'lucide-react';
 import {
   Product,
@@ -52,13 +52,21 @@ export const CustomOrderScreen: React.FC = () => {
   const [portion, setPortion] = useState<number>(1);
   const [spiceLevel, setSpiceLevel] = useState<number>(50);
 
-  // Curry / Salna Level state (Only in Custom Order Flow)
+  // Curry / Salna Level state
   const availableCurries = useMemo<CurryOption[]>(() => {
-    return (curries || []).filter((c) => c.active !== false);
-  }, [curries]);
+    const active = (curries || []).filter((c) => c.active !== false);
+    if (!currentProduct || !currentProduct.curryConfig) return active;
+    const allowed = currentProduct.curryConfig.allowedCurryIds;
+    if (Array.isArray(allowed) && allowed.length > 0) {
+      return active.filter((c) => allowed.includes(c.id));
+    }
+    return active;
+  }, [curries, currentProduct]);
 
   const [selectedCurryId, setSelectedCurryId] = useState<string>('');
-  const [curryUnits, setCurryUnits] = useState<number>(1);
+  // Units of curry per dish/product
+  const [curryUnitsPerDish, setCurryUnitsPerDish] = useState<number>(1);
+  const [isManualCurryOverride, setIsManualCurryOverride] = useState<boolean>(false);
 
   // Selected customization items mapped by sectionId -> Array of itemId
   const [selectedSectionItems, setSelectedSectionItems] = useState<{ [sectionId: string]: string[] }>({});
@@ -71,16 +79,21 @@ export const CustomOrderScreen: React.FC = () => {
     if (!currentProduct) return;
     setPortion(currentProduct.defaultPortion || 1);
     setSpiceLevel(currentProduct.defaultSpice || 50);
+    setIsManualCurryOverride(false);
 
     // Initialize Curry if available
-    if (availableCurries.length > 0) {
-      const defId = currentProduct.curryConfig?.defaultCurryId;
+    const curryCfg = currentProduct.curryConfig;
+    const isCurryEnabled = curryCfg ? curryCfg.enabled !== false : true;
+
+    if (isCurryEnabled && availableCurries.length > 0) {
+      const defId = curryCfg?.defaultCurryId;
       const initialCurry = availableCurries.find((c) => c.id === defId) || availableCurries[0];
       setSelectedCurryId(initialCurry ? initialCurry.id : '');
-      setCurryUnits(currentProduct.curryConfig?.defaultUnits || 1);
+      const defaultUnits = curryCfg?.defaultCurryPerItem ?? curryCfg?.defaultUnits ?? 1;
+      setCurryUnitsPerDish(defaultUnits);
     } else {
       setSelectedCurryId('');
-      setCurryUnits(1);
+      setCurryUnitsPerDish(0);
     }
 
     const initialSelections: { [sectionId: string]: string[] } = {};
@@ -108,12 +121,44 @@ export const CustomOrderScreen: React.FC = () => {
     return availableCurries.find((c) => c.id === selectedCurryId) || null;
   }, [selectedCurryId, availableCurries]);
 
+  // Handle portion increase/decrease with auto curry synchronization
+  const handlePortionChange = (newPortion: number) => {
+    const validPortion = Math.max(1, newPortion);
+    setPortion(validPortion);
+    // If not manually overridden, keep default curry per dish
+    if (!isManualCurryOverride && currentProduct) {
+      const defUnits = currentProduct.curryConfig?.defaultCurryPerItem ?? currentProduct.curryConfig?.defaultUnits ?? 1;
+      setCurryUnitsPerDish(defUnits);
+    }
+  };
+
+  // Handle manual curry unit adjustment
+  const handleCurryUnitsChange = (newUnits: number) => {
+    const min = currentProduct?.curryConfig?.minUnits ?? 0;
+    const max = currentProduct?.curryConfig?.maxUnits ?? 20;
+    const clamped = Math.max(min, Math.min(max, newUnits));
+    setCurryUnitsPerDish(clamped);
+    setIsManualCurryOverride(true);
+  };
+
+  // Reset curry units to product default
+  const handleResetCurryToDefault = () => {
+    const defUnits = currentProduct?.curryConfig?.defaultCurryPerItem ?? currentProduct?.curryConfig?.defaultUnits ?? 1;
+    setCurryUnitsPerDish(defUnits);
+    setIsManualCurryOverride(false);
+  };
+
+  // Total curry units across all portions
+  const totalCurryUnits = curryUnitsPerDish * portion;
+
   // Curry Snapshot & Price
   const currySnapshot = useMemo<SelectedCurrySnapshot | undefined>(() => {
-    if (!selectedCurryObj) return undefined;
+    if (!selectedCurryObj || curryUnitsPerDish === 0) {
+      return undefined;
+    }
     const pricePerUnit = selectedCurryObj.pricePerUnit;
-    const unitsPerProduct = curryUnits;
-    const totalUnits = unitsPerProduct * portion;
+    const unitsPerProduct = curryUnitsPerDish;
+    const totalUnits = totalCurryUnits;
     const totalPrice = Number((pricePerUnit * totalUnits).toFixed(2));
 
     return {
@@ -126,7 +171,7 @@ export const CustomOrderScreen: React.FC = () => {
       totalUnits,
       totalPrice,
     };
-  }, [selectedCurryObj, curryUnits, portion]);
+  }, [selectedCurryObj, curryUnitsPerDish, totalCurryUnits]);
 
   // Carousel navigation handlers
   const handlePrevProduct = () => {
@@ -208,7 +253,7 @@ export const CustomOrderScreen: React.FC = () => {
     }
 
     // Add curry per-item cost if selected
-    const curryPerItem = selectedCurryObj ? selectedCurryObj.pricePerUnit * curryUnits : 0;
+    const curryPerItem = selectedCurryObj && curryUnitsPerDish > 0 ? selectedCurryObj.pricePerUnit * curryUnitsPerDish : 0;
     const single = base + addOns + curryPerItem;
     const total = Number((single * portion).toFixed(2));
 
@@ -217,7 +262,7 @@ export const CustomOrderScreen: React.FC = () => {
       totalPrice: total,
       chosenSectionChoices: choices,
     };
-  }, [currentProduct, selectedSectionItems, portion, selectedCurryObj, curryUnits]);
+  }, [currentProduct, selectedSectionItems, portion, selectedCurryObj, curryUnitsPerDish]);
 
   // Construct CartItem representation
   const buildCartItem = (): CartItem => {
@@ -263,6 +308,8 @@ export const CustomOrderScreen: React.FC = () => {
     );
   }
 
+  const isCurryEnabled = currentProduct.curryConfig ? currentProduct.curryConfig.enabled !== false : true;
+
   return (
     <div className="w-full min-h-screen bg-[#FDFDFD] flex flex-col justify-between pb-28 relative">
       {/* Added to Cart Floating Toast Notification */}
@@ -300,7 +347,7 @@ export const CustomOrderScreen: React.FC = () => {
           >
             <ShoppingBag className="w-5 h-5 stroke-[2.2]" />
             {cartCount > 0 && (
-              <span className="absolute 1 top-1 right-1 w-4 h-4 bg-[#EF2A39] text-white text-[9px] font-black rounded-full flex items-center justify-center shadow-xs">
+              <span className="absolute top-1 right-1 w-4 h-4 bg-[#EF2A39] text-white text-[9px] font-black rounded-full flex items-center justify-center shadow-xs">
                 {cartCount}
               </span>
             )}
@@ -371,7 +418,7 @@ export const CustomOrderScreen: React.FC = () => {
 
               {/* Price */}
               <div className="mt-2 text-base font-black text-[#EF2A39]">
-                Base: ${currentProduct.price.toFixed(2)}
+                Base: ₹{currentProduct.price.toFixed(2)}
               </div>
 
               {/* Carousel Pagination Dots */}
@@ -397,7 +444,7 @@ export const CustomOrderScreen: React.FC = () => {
 
         {/* Controls: Spice Level & Portion Counter (Exclusively inside + Customization Flow) */}
         <div className="px-6 mt-4 grid grid-cols-2 gap-3">
-          {/* Spicy Slider Card (Matches Screenshot 2) */}
+          {/* Spicy Slider Card */}
           <div className="bg-white rounded-2xl p-3.5 border border-gray-100 shadow-2xs">
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-[11px] font-black text-[#322A2E]">
@@ -428,7 +475,7 @@ export const CustomOrderScreen: React.FC = () => {
             </span>
             <div className="flex items-center justify-between mt-2">
               <button
-                onClick={() => setPortion((p) => Math.max(1, p - 1))}
+                onClick={() => handlePortionChange(portion - 1)}
                 className="w-8 h-8 rounded-xl bg-[#EF2A39] hover:bg-[#D81C2B] text-white flex items-center justify-center shadow-xs active:scale-90 transition-all cursor-pointer"
                 aria-label="Decrease portion"
               >
@@ -440,7 +487,7 @@ export const CustomOrderScreen: React.FC = () => {
               </span>
 
               <button
-                onClick={() => setPortion((p) => p + 1)}
+                onClick={() => handlePortionChange(portion + 1)}
                 className="w-8 h-8 rounded-xl bg-[#EF2A39] hover:bg-[#D81C2B] text-white flex items-center justify-center shadow-xs active:scale-90 transition-all cursor-pointer"
                 aria-label="Increase portion"
               >
@@ -451,7 +498,7 @@ export const CustomOrderScreen: React.FC = () => {
         </div>
 
         {/* Salna / Curry Level Section (Exclusively inside + Customization Flow) */}
-        {availableCurries.length > 0 && (
+        {isCurryEnabled && availableCurries.length > 0 && (
           <div className="px-6 mt-4">
             <div className="bg-gradient-to-br from-orange-50/70 to-white rounded-3xl p-4 border border-orange-200/80 shadow-2xs">
               <div className="flex items-center justify-between mb-2">
@@ -466,9 +513,9 @@ export const CustomOrderScreen: React.FC = () => {
                     <p className="text-[10px] text-gray-500 font-medium">Select gravy & adjust portion amount with slider</p>
                   </div>
                 </div>
-                {selectedCurryObj && curryUnits > 0 ? (
+                {selectedCurryObj && curryUnitsPerDish > 0 ? (
                   <span className="text-[10px] font-black px-2.5 py-1 rounded-full bg-orange-100 text-orange-800 border border-orange-200">
-                    +₹{(selectedCurryObj.pricePerUnit * curryUnits).toFixed(2)} / dish
+                    +₹{(selectedCurryObj.pricePerUnit * curryUnitsPerDish).toFixed(2)} / dish
                   </span>
                 ) : (
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
@@ -483,10 +530,11 @@ export const CustomOrderScreen: React.FC = () => {
                 <div
                   onClick={() => {
                     setSelectedCurryId('');
-                    setCurryUnits(0);
+                    setCurryUnitsPerDish(0);
+                    setIsManualCurryOverride(true);
                   }}
                   className={`p-2.5 rounded-2xl border flex items-center justify-between transition-all cursor-pointer select-none ${
-                    !selectedCurryId || curryUnits === 0
+                    !selectedCurryId || curryUnitsPerDish === 0
                       ? 'bg-white border-gray-400 shadow-xs ring-1 ring-gray-400'
                       : 'bg-white/80 border-gray-200 hover:border-gray-300'
                   }`}
@@ -501,23 +549,26 @@ export const CustomOrderScreen: React.FC = () => {
                   </div>
                   <div
                     className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                      !selectedCurryId || curryUnits === 0
+                      !selectedCurryId || curryUnitsPerDish === 0
                         ? 'bg-gray-700 border-gray-700 text-white'
                         : 'border-gray-300'
                     }`}
                   >
-                    {(!selectedCurryId || curryUnits === 0) && <Check className="w-2.5 h-2.5 stroke-[4]" />}
+                    {(!selectedCurryId || curryUnitsPerDish === 0) && <Check className="w-2.5 h-2.5 stroke-[4]" />}
                   </div>
                 </div>
 
                 {availableCurries.map((curry) => {
-                  const isSelected = selectedCurryId === curry.id && curryUnits > 0;
+                  const isSelected = selectedCurryId === curry.id && curryUnitsPerDish > 0;
                   return (
                     <div
                       key={curry.id}
                       onClick={() => {
                         setSelectedCurryId(curry.id);
-                        if (curryUnits === 0) setCurryUnits(1);
+                        if (curryUnitsPerDish === 0) {
+                          const defUnits = currentProduct.curryConfig?.defaultCurryPerItem ?? currentProduct.curryConfig?.defaultUnits ?? 1;
+                          setCurryUnitsPerDish(defUnits);
+                        }
                       }}
                       className={`p-2.5 rounded-2xl border flex items-center justify-between transition-all cursor-pointer select-none ${
                         isSelected
@@ -545,38 +596,68 @@ export const CustomOrderScreen: React.FC = () => {
                 })}
               </div>
 
-              {/* Slider-based Curry Amount Selector with live price calculation */}
+              {/* Interactive Curry Amount Selector with Stepper & Slider */}
               {selectedCurryObj && (
                 <div className="mt-3.5 pt-3 border-t border-orange-200/70">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[11px] font-black text-[#322A2E]">
-                      Curry Amount ({selectedCurryObj.unitLabel || 'Spoons'}):
-                    </span>
+                  <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-[12px] font-black text-[#EF2A39]">
-                        {curryUnits} {selectedCurryObj.unitLabel || 'Spoon'}{curryUnits !== 1 ? 's' : ''}
+                      <span className="text-[11px] font-black text-[#322A2E]">
+                        Curry Quantity:
                       </span>
-                      <span className="text-[10px] font-bold text-gray-500">
-                        (₹{selectedCurryObj.pricePerUnit.toFixed(2)} × {curryUnits} = ₹{(selectedCurryObj.pricePerUnit * curryUnits).toFixed(2)})
-                      </span>
+                      {isManualCurryOverride && (
+                        <button
+                          onClick={handleResetCurryToDefault}
+                          className="text-[9px] text-orange-700 hover:text-orange-900 bg-orange-100 px-1.5 py-0.5 rounded-md flex items-center gap-0.5 font-bold transition-colors cursor-pointer"
+                          title="Reset to default formula"
+                        >
+                          <RotateCcw className="w-2.5 h-2.5" />
+                          <span>Auto</span>
+                        </button>
+                      )}
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center bg-white border border-orange-200 rounded-xl p-0.5 shadow-2xs">
+                        <button
+                          onClick={() => handleCurryUnitsChange(curryUnitsPerDish - 1)}
+                          className="w-6 h-6 rounded-lg bg-orange-50 hover:bg-orange-100 text-orange-900 flex items-center justify-center text-xs font-bold cursor-pointer"
+                          aria-label="Decrease curry spoon"
+                        >
+                          <Minus className="w-3 h-3 stroke-[2.5]" />
+                        </button>
+                        <span className="w-8 text-center text-xs font-black text-[#322A2E]">
+                          {curryUnitsPerDish}
+                        </span>
+                        <button
+                          onClick={() => handleCurryUnitsChange(curryUnitsPerDish + 1)}
+                          className="w-6 h-6 rounded-lg bg-orange-50 hover:bg-orange-100 text-orange-900 flex items-center justify-center text-xs font-bold cursor-pointer"
+                          aria-label="Increase curry spoon"
+                        >
+                          <Plus className="w-3 h-3 stroke-[2.5]" />
+                        </button>
+                      </div>
                     </div>
                   </div>
 
                   {/* Curry Amount Range Slider */}
                   <input
                     type="range"
-                    min="1"
-                    max="10"
+                    min={currentProduct.curryConfig?.minUnits ?? 0}
+                    max={currentProduct.curryConfig?.maxUnits ?? 10}
                     step="1"
-                    value={curryUnits}
-                    onChange={(e) => setCurryUnits(Number(e.target.value))}
+                    value={curryUnitsPerDish}
+                    onChange={(e) => handleCurryUnitsChange(Number(e.target.value))}
                     className="w-full accent-[#EF2A39] h-2 bg-orange-200 rounded-lg cursor-pointer transition-all"
                   />
 
-                  <div className="flex justify-between text-[9px] font-bold mt-1 text-gray-500">
-                    <span>1 Spoon (Light Gravy)</span>
-                    <span className="text-orange-700 font-extrabold">{curryUnits > 5 ? '🔥 Rich & Juicy' : 'Normal'}</span>
-                    <span className="text-[#EF2A39]">10 Spoons (Extra Rich)</span>
+                  {/* Dynamic Calculation breakdown badge */}
+                  <div className="mt-2 p-2 rounded-xl bg-orange-100/70 border border-orange-200 flex items-center justify-between text-[10px]">
+                    <div className="text-orange-950 font-medium">
+                      {portion} dish{portion > 1 ? 'es' : ''} × {curryUnitsPerDish} {selectedCurryObj.unitLabel || 'Spoon'}{curryUnitsPerDish !== 1 ? 's' : ''} = <strong className="font-black text-[#EF2A39]">{totalCurryUnits} {selectedCurryObj.unitLabel || 'Spoon'}{totalCurryUnits !== 1 ? 's' : ''}</strong>
+                    </div>
+                    <div className="font-black text-[#EF2A39]">
+                      {totalCurryUnits === 0 ? '₹0.00' : `${totalCurryUnits} × ₹${selectedCurryObj.pricePerUnit.toFixed(2)} = ₹${(selectedCurryObj.pricePerUnit * totalCurryUnits).toFixed(2)}`}
+                    </div>
                   </div>
                 </div>
               )}
@@ -672,8 +753,8 @@ export const CustomOrderScreen: React.FC = () => {
                             >
                               {item.price > 0
                                 ? item.priceType === 'fixed'
-                                  ? `$${item.price.toFixed(2)} Fixed`
-                                  : `+$${item.price.toFixed(2)}`
+                                  ? `₹${item.price.toFixed(2)} Fixed`
+                                  : `+₹${item.price.toFixed(2)}`
                                 : 'Included'}
                             </p>
                           </div>
@@ -713,7 +794,7 @@ export const CustomOrderScreen: React.FC = () => {
               Total Price
             </span>
             <div className="text-xl font-black text-[#322A2E]">
-              ${totalPrice.toFixed(2)}
+              ₹{totalPrice.toFixed(2)}
             </div>
           </div>
 

@@ -17,18 +17,22 @@ import {
   ToggleLeft,
   ToggleRight,
   Info,
+  Soup,
+  Check,
 } from 'lucide-react';
 import { AdminProductItem } from '../types';
-import { CustomizationSection, CustomizationSectionItem } from '../../types';
+import { CustomizationSection, CustomizationSectionItem, CurryOption, ProductCurryConfig } from '../../types';
 import { adminFetch } from '../adminApi';
 
 interface AdminCustomOrderTabProps {
   products: AdminProductItem[];
+  curries?: CurryOption[];
   onRefresh: () => void;
 }
 
 export const AdminCustomOrderTab: React.FC<AdminCustomOrderTabProps> = ({
   products,
+  curries = [],
   onRefresh,
 }) => {
   // Active selected product for custom order section configuration
@@ -38,6 +42,15 @@ export const AdminCustomOrderTab: React.FC<AdminCustomOrderTabProps> = ({
   const [editingSections, setEditingSections] = useState<CustomizationSection[]>([]);
   const [customOrderEnabled, setCustomOrderEnabled] = useState<boolean>(true);
   const [customOrderSortOrder, setCustomOrderSortOrder] = useState<number>(1);
+  const [curryConfig, setCurryConfig] = useState<ProductCurryConfig>({
+    enabled: true,
+    defaultCurryId: '',
+    defaultCurryPerItem: 1,
+    minUnits: 0,
+    maxUnits: 10,
+    allowCurryChange: true,
+    allowedCurryIds: [],
+  });
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [saveErrorMsg, setSaveErrorMsg] = useState<string | null>(null);
@@ -50,15 +63,24 @@ export const AdminCustomOrderTab: React.FC<AdminCustomOrderTabProps> = ({
     item: Partial<CustomizationSectionItem>;
   } | null>(null);
 
-  // When selected product changes, load its custom order sections
+  // When selected product changes, load its custom order sections and curry config
   React.useEffect(() => {
     const prod = products.find((p) => p.id === selectedProductId);
     if (prod) {
       setEditingSections(prod.customizationSections ? JSON.parse(JSON.stringify(prod.customizationSections)) : []);
       setCustomOrderEnabled(prod.customOrderEnabled !== false);
       setCustomOrderSortOrder(prod.customOrderSortOrder || 1);
+      setCurryConfig({
+        enabled: prod.curryConfig?.enabled !== false,
+        defaultCurryId: prod.curryConfig?.defaultCurryId || (curries[0]?.id || ''),
+        defaultCurryPerItem: prod.curryConfig?.defaultCurryPerItem ?? prod.curryConfig?.defaultUnits ?? 1,
+        minUnits: prod.curryConfig?.minUnits ?? 0,
+        maxUnits: prod.curryConfig?.maxUnits ?? 10,
+        allowCurryChange: prod.curryConfig?.allowCurryChange !== false,
+        allowedCurryIds: Array.isArray(prod.curryConfig?.allowedCurryIds) ? prod.curryConfig.allowedCurryIds : [],
+      });
     }
-  }, [selectedProductId, products]);
+  }, [selectedProductId, products, curries]);
 
   const selectedProduct = products.find((p) => p.id === selectedProductId);
 
@@ -77,12 +99,13 @@ export const AdminCustomOrderTab: React.FC<AdminCustomOrderTabProps> = ({
           customizationSections: editingSections,
           customOrderEnabled,
           customOrderSortOrder,
+          curryConfig,
         }),
       });
 
       const data = await res.json();
       if (data.success) {
-        setSaveSuccessMsg('Custom Order sections successfully saved and synced!');
+        setSaveSuccessMsg('Custom Order sections and Salna/Curry settings saved successfully!');
         onRefresh();
         setTimeout(() => setSaveSuccessMsg(null), 4000);
       } else {
@@ -398,6 +421,168 @@ export const AdminCustomOrderTab: React.FC<AdminCustomOrderTabProps> = ({
                   Lower numbers appear first in the horizontal swipe carousel.
                 </span>
               </div>
+            </div>
+          )}
+
+          {/* Salna & Curry Level Engine Settings for Selected Product */}
+          {selectedProduct && (
+            <div className="bg-white rounded-3xl p-5 border border-orange-200/80 shadow-sm space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-black text-[#322A2E] uppercase tracking-wider flex items-center gap-2">
+                  <Soup className="w-4 h-4 text-[#EF2A39]" />
+                  Salna / Curry Engine Settings
+                </h3>
+                <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-full bg-orange-100 text-orange-800">
+                  Reactive Sync
+                </span>
+              </div>
+
+              {/* Enable / Disable Curry Option for this dish */}
+              <div className="flex items-center justify-between p-3 rounded-2xl bg-orange-50/50 border border-orange-100">
+                <div>
+                  <label className="text-xs font-black text-[#322A2E] block">
+                    Salna / Curry Level Enabled
+                  </label>
+                  <span className="text-[10px] text-gray-500">
+                    Enable gravy selection & quantity sliders in Customizer
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCurryConfig((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                  className="cursor-pointer"
+                >
+                  {curryConfig.enabled ? (
+                    <ToggleRight className="w-8 h-8 text-[#EF2A39]" />
+                  ) : (
+                    <ToggleLeft className="w-8 h-8 text-gray-300" />
+                  )}
+                </button>
+              </div>
+
+              {curryConfig.enabled && (
+                <div className="space-y-3.5 pt-2 border-t border-gray-100">
+                  {/* Default Curry Option */}
+                  <div>
+                    <label className="text-xs font-bold text-gray-700 block mb-1">
+                      Default Curry / Salna
+                    </label>
+                    <select
+                      value={curryConfig.defaultCurryId || ''}
+                      onChange={(e) => setCurryConfig((prev) => ({ ...prev, defaultCurryId: e.target.value }))}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 text-xs font-bold text-[#322A2E] bg-white focus:outline-none focus:border-[#EF2A39]"
+                    >
+                      <option value="">-- No Default Curry --</option>
+                      {curries.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name} (₹{c.pricePerUnit.toFixed(2)} / {c.unitLabel || 'Spoon'}) {c.active === false ? '[Out of Stock]' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Quantity Formula Defaults */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-gray-600 block mb-1">
+                        Default / Dish
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="20"
+                        value={curryConfig.defaultCurryPerItem ?? 1}
+                        onChange={(e) => setCurryConfig((prev) => ({ ...prev, defaultCurryPerItem: Math.max(0, parseInt(e.target.value) || 0) }))}
+                        className="w-full px-2.5 py-2 rounded-xl border border-gray-200 text-xs font-bold text-[#322A2E] focus:outline-none focus:border-[#EF2A39]"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-gray-600 block mb-1">
+                        Min Spoons
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={curryConfig.minUnits ?? 0}
+                        onChange={(e) => setCurryConfig((prev) => ({ ...prev, minUnits: Math.max(0, parseInt(e.target.value) || 0) }))}
+                        className="w-full px-2.5 py-2 rounded-xl border border-gray-200 text-xs font-bold text-[#322A2E] focus:outline-none focus:border-[#EF2A39]"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-gray-600 block mb-1">
+                        Max Spoons
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="50"
+                        value={curryConfig.maxUnits ?? 10}
+                        onChange={(e) => setCurryConfig((prev) => ({ ...prev, maxUnits: Math.max(1, parseInt(e.target.value) || 10) }))}
+                        className="w-full px-2.5 py-2 rounded-xl border border-gray-200 text-xs font-bold text-[#322A2E] focus:outline-none focus:border-[#EF2A39]"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Allowed Curries Restriction */}
+                  <div>
+                    <label className="text-xs font-bold text-gray-700 block mb-1.5">
+                      Allowed Gravies for this Dish ({curries.length})
+                    </label>
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                      {curries.map((curry) => {
+                        const isAllowed =
+                          !curryConfig.allowedCurryIds ||
+                          curryConfig.allowedCurryIds.length === 0 ||
+                          curryConfig.allowedCurryIds.includes(curry.id);
+
+                        return (
+                          <div
+                            key={curry.id}
+                            onClick={() => {
+                              setCurryConfig((prev) => {
+                                const currentAllowed = prev.allowedCurryIds || [];
+                                if (currentAllowed.length === 0) {
+                                  // currently all allowed, unchecking this one means all others allowed
+                                  return {
+                                    ...prev,
+                                    allowedCurryIds: curries.filter((c) => c.id !== curry.id).map((c) => c.id),
+                                  };
+                                }
+                                if (currentAllowed.includes(curry.id)) {
+                                  return {
+                                    ...prev,
+                                    allowedCurryIds: currentAllowed.filter((id) => id !== curry.id),
+                                  };
+                                } else {
+                                  const updated = [...currentAllowed, curry.id];
+                                  return {
+                                    ...prev,
+                                    allowedCurryIds: updated.length === curries.length ? [] : updated,
+                                  };
+                                }
+                              });
+                            }}
+                            className={`p-2 rounded-xl border text-xs flex items-center justify-between cursor-pointer transition-all ${
+                              isAllowed
+                                ? 'bg-orange-50/50 border-orange-200 text-[#322A2E]'
+                                : 'bg-gray-50 border-gray-100 text-gray-400 opacity-60'
+                            }`}
+                          >
+                            <span className="font-bold truncate">{curry.name} (₹{curry.pricePerUnit.toFixed(2)})</span>
+                            <div
+                              className={`w-4 h-4 rounded-md border flex items-center justify-center ${
+                                isAllowed ? 'bg-[#EF2A39] border-[#EF2A39] text-white' : 'border-gray-300'
+                              }`}
+                            >
+                              {isAllowed && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

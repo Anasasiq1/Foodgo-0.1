@@ -448,10 +448,10 @@ apiRouter.get('/custom-order/products', (_req: Request, res: Response) => {
   });
 });
 
-// PUT /api/admin/products/:id/customization-sections (Admin specifically manages sections for a product)
+// PUT /api/admin/products/:id/customization-sections (Admin specifically manages sections and curryConfig for a product)
 apiRouter.put('/admin/products/:id/customization-sections', requireAdminAuth, (req: Request, res: Response) => {
   const { id } = req.params;
-  const { customizationSections, customOrderEnabled, customOrderSortOrder } = req.body;
+  const { customizationSections, customOrderEnabled, customOrderSortOrder, curryConfig } = req.body;
   const database = db.getDb();
   const product = database.products.find((p) => p.id === id);
 
@@ -468,16 +468,19 @@ apiRouter.put('/admin/products/:id/customization-sections', requireAdminAuth, (r
   if (customOrderSortOrder !== undefined) {
     product.customOrderSortOrder = Number(customOrderSortOrder);
   }
+  if (curryConfig !== undefined) {
+    product.curryConfig = curryConfig;
+  }
 
   product.updatedAt = new Date().toISOString();
   db.save();
 
-  db.addAuditLog('UPDATE_CUSTOMIZATION_SECTIONS', `Updated Custom Order sections for "${product.name}" (${product.customizationSections?.length || 0} sections)`, (req as any).adminUser, req.ip);
+  db.addAuditLog('UPDATE_CUSTOMIZATION_SECTIONS', `Updated Custom Order & Curry config for "${product.name}"`, (req as any).adminUser, req.ip);
 
   return res.json({
     success: true,
     product,
-    message: 'Customization sections updated successfully',
+    message: 'Customization sections & curry config updated successfully',
   });
 });
 
@@ -1114,19 +1117,33 @@ apiRouter.post('/orders', (req: Request, res: Response) => {
           error: `Curry option "${curryInDb.name}" is currently out of stock`,
         });
       }
-      const unitsPerProduct = Math.max(1, parseInt(rawItem.curry.unitsPerProduct, 10) || 1);
-      const totalUnits = unitsPerProduct * portion;
-      curryTotalForItem = Number((curryInDb.pricePerUnit * totalUnits).toFixed(2));
-      selectedCurrySnapshot = {
-        enabled: true,
-        curryId: curryInDb.id,
-        curryName: curryInDb.name,
-        pricePerUnit: curryInDb.pricePerUnit,
-        unitLabel: curryInDb.unitLabel || 'Spoon',
-        unitsPerProduct,
-        totalUnits,
-        totalPrice: curryTotalForItem,
-      };
+      const rawUnits = parseInt(rawItem.curry.unitsPerProduct, 10);
+      const unitsPerProduct = isNaN(rawUnits) ? 1 : Math.max(0, rawUnits);
+      if (unitsPerProduct > 0) {
+        const totalUnits = unitsPerProduct * portion;
+        curryTotalForItem = Number((curryInDb.pricePerUnit * totalUnits).toFixed(2));
+        selectedCurrySnapshot = {
+          enabled: true,
+          curryId: curryInDb.id,
+          curryName: curryInDb.name,
+          pricePerUnit: curryInDb.pricePerUnit,
+          unitLabel: curryInDb.unitLabel || 'Spoon',
+          unitsPerProduct,
+          totalUnits,
+          totalPrice: curryTotalForItem,
+        };
+      } else {
+        selectedCurrySnapshot = {
+          enabled: false,
+          curryId: curryInDb.id,
+          curryName: curryInDb.name,
+          pricePerUnit: curryInDb.pricePerUnit,
+          unitLabel: curryInDb.unitLabel || 'Spoon',
+          unitsPerProduct: 0,
+          totalUnits: 0,
+          totalPrice: 0,
+        };
+      }
     }
 
     itemUnitPrice += toppingsTotal + sidesTotal;

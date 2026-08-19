@@ -79,11 +79,12 @@ export interface CurryOption {
 export interface ProductCurryConfig {
   enabled: boolean; // whether this product has Salna Level enabled
   defaultCurryId?: string; // id of default curry (e.g. "curry-salna")
-  defaultUnits?: number; // default spoon level per item (default 1)
-  minUnits?: number; // minimum spoons (default 1)
-  maxUnits?: number; // maximum spoons (e.g. 5 or 10)
+  defaultUnits?: number; // legacy alias
+  defaultCurryPerItem?: number; // default curry units per item (default 1)
+  minUnits?: number; // minimum spoons/units (default 0)
+  maxUnits?: number; // maximum spoons/units (default 20)
   allowCurryChange?: boolean; // whether customer can pick other curries (default true)
-  allowedCurryIds?: string[]; // list of allowed curry IDs for this product
+  allowedCurryIds?: string[]; // list of allowed curry IDs for this product (empty = all)
 }
 
 export interface SelectedCurrySnapshot {

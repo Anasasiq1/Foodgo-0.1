@@ -372,6 +372,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
           {activeTab === 'custom-order' && (
             <AdminCustomOrderTab
               products={products}
+              curries={curries}
               onRefresh={onRefreshData}
             />
           )}
