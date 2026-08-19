@@ -1,0 +1,18 @@
+# Allow static asset viewing but prevent script execution
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php7.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php8.c>
+    php_flag engine off
+</IfModule>
+
+# Block executable file extensions completely
+<FilesMatch "(?i)\.(php|php3|php4|php5|phtml|pl|py|jsp|asp|sh|cgi|exe)$">
+    Order Deny,Allow
+    Deny from all
+</FilesMatch>
+
+Options -ExecCGI -Indexes

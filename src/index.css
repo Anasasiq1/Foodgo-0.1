@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --primary: #EF2A39;
+    --primary-hover: #D81C2B;
+    --dark: #322A2E;
+    --dark-surface: #3A3236;
+    --bg-page: #FDFDFD;
+    --card-bg: #FFFFFF;
+    --muted: #8E8E93;
+    --border: #F0F0F2;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background-color: #EFEFEF;
+    color: #1E1E1E;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+.font-logo {
+  font-family: 'Lobster Two', 'Pacifico', 'Satisfy', cursive;
+}
+
+.font-script {
+  font-family: 'Pacifico', 'Lobster Two', cursive;
+}
+
+/* Custom spice range slider */
+input[type=range].spice-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: #EDEDEE;
+  border-radius: 9999px;
+  outline: none;
+}
+
+input[type=range].spice-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #EF2A39;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(239, 42, 57, 0.4);
+  border: 2px solid #FFFFFF;
+  transition: transform 0.1s ease;
+}
+
+input[type=range].spice-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+input[type=range].spice-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #EF2A39;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(239, 42, 57, 0.4);
+  border: 2px solid #FFFFFF;
+}
+
+/* Hide scrollbar for horizontal categories */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Smooth active press feedback */
+.active-press:active {
+  transform: scale(0.96);
+}

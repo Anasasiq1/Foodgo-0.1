@@ -1,0 +1,10 @@
+# Block direct web access to all configuration files
+<Files "*">
+    Order Deny,Allow
+    Deny from all
+</Files>
+
+# Apache 2.4+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>

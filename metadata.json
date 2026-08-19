@@ -1,0 +1,10 @@
+{
+  "name": "Foodgo 1. 1",
+  "description": "Foodgo multi-service ordering web application with dynamic inline header module switcher (Food, Grocery, Pharmacy, Cosmetics, Stationery), customization builder, real-time admin sync, and customer support.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
