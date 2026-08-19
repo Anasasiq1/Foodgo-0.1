@@ -1,468 +1,451 @@
 <?php
 /**
- * Foodgo Gourmet Ordering Platform - REST API (PHP Backend)
- * Handles JSON endpoints for both customer ordering and admin management.
+ * Foodgo Gourmet Ordering Platform - Unified FileStore REST API Router
+ * 
+ * 100% Databaseless File-Storage Backend Architecture (JSON FileStore)
+ * No MySQL, No MariaDB, No PostgreSQL, No SQLite, No PDO required!
  */
 
 define('FOODGO_ACCESS', true);
+
+// Set strict JSON and CORS headers
 header('Content-Type: application/json; charset=utf-8');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-Admin-Token');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: SAMEORIGIN');
 
-$baseDir = dirname(__DIR__);
-$configFile = $baseDir . '/config/config.php';
-
-// Check if configured
-if (!file_exists($configFile)) {
-    http_response_code(503);
-    echo json_encode(['success' => false, 'error' => 'Application is not installed. Please run install.php.']);
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
     exit;
 }
 
-$config = include($configFile);
+// Load FileStore and Auto-Initializer
+require_once dirname(__DIR__) . '/includes/FileStore.php';
+require_once dirname(__DIR__) . '/includes/DataInitializer.php';
 
-// Establish Database Connection
-try {
-    $db = $config['database'] ?? [];
-    $dsn = "mysql:host={$db['host']};port={$db['port']};dbname={$db['database']};charset={$db['charset']}";
-    $pdo = new PDO($dsn, $db['username'], $db['password'], [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-    ]);
-} catch (PDOException $e) {
-    http_response_code(500);
-    echo json_encode(['success' => false, 'error' => 'Database connection failed: ' . $e->getMessage()]);
-    exit;
+FileStore::init();
+
+// Auto-run DataInitializer on first run if data files are missing
+if (!file_exists(FileStore::getFilePath('products')) || !file_exists(FileStore::getFilePath('users'))) {
+    DataInitializer::run(false);
 }
 
-// Request path parsing
+// Parse request route and body
 $requestUri = $_SERVER['REQUEST_URI'] ?? '/';
-$parsedUrl = parse_url($requestUri);
-$path = $parsedUrl['path'] ?? '/';
+$path = parse_url($requestUri, PHP_URL_PATH) ?? '/';
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-$input = json_decode(file_get_contents('php://input'), true) ?: $_POST;
+$rawInput = file_get_contents('php://input');
+$input = json_decode($rawInput, true) ?: $_POST;
 
 // Strip /api prefix
 $route = preg_replace('#^/api#', '', $path);
 if ($route === '') $route = '/';
 
 // ==============================================================================
-// 1. PRODUCTS API
+// HELPER FUNCTIONS FOR AUTH & AUDIT LOGS
 // ==============================================================================
-if (preg_match('#^/products/?$#', $route) && $method === 'GET') {
-    $stmt = $pdo->query("SELECT * FROM `products` ORDER BY `sort_order` ASC, `created_at` DESC");
-    $products = $stmt->fetchAll();
-    
-    // Attach option groups for each product
-    foreach ($products as &$prod) {
-        $prod['available'] = (bool)$prod['available'];
-        $prod['featured'] = (bool)$prod['featured'];
-        $prod['popular'] = (bool)$prod['popular'];
-        $prod['isVeg'] = (bool)$prod['is_veg'];
-        $prod['price'] = (float)$prod['price'];
-        $prod['rating'] = (float)$prod['rating'];
-        $prod['reviewCount'] = (int)$prod['review_count'];
-        $prod['prepTime'] = $prod['prep_time'];
-        $prod['spicyLevel'] = (int)$prod['spicy_level'];
-        $prod['portionWeight'] = $prod['portion_weight'];
+function getBearerOrCookieToken(): ?string {
+    if (!empty($_COOKIE['foodgo_admin_token'])) {
+        return $_COOKIE['foodgo_admin_token'];
+    }
+    if (!empty($_COOKIE['admin_session'])) {
+        return $_COOKIE['admin_session'];
+    }
+    if (!empty($_SERVER['HTTP_X_ADMIN_TOKEN'])) {
+        return $_SERVER['HTTP_X_ADMIN_TOKEN'];
+    }
+    $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    if (preg_match('/Bearer\s+(.*)$/i', $authHeader, $matches)) {
+        return trim($matches[1]);
+    }
+    return null;
+}
 
-        // Option groups
-        $ogStmt = $pdo->prepare("SELECT * FROM `product_option_groups` WHERE `product_id` = :pid ORDER BY `sort_order` ASC");
-        $ogStmt->execute([':pid' => $prod['id']]);
-        $groups = $ogStmt->fetchAll();
-
-        foreach ($groups as &$grp) {
-            $grp['required'] = (bool)$grp['required'];
-            $grp['minSelections'] = (int)$grp['min_selections'];
-            $grp['maxSelections'] = (int)$grp['max_selections'];
-            $grp['selectionType'] = $grp['selection_type'];
-
-            $optStmt = $pdo->prepare("SELECT * FROM `product_options` WHERE `group_id` = :gid ORDER BY `sort_order` ASC");
-            $optStmt->execute([':gid' => $grp['id']]);
-            $opts = $optStmt->fetchAll();
-            foreach ($opts as &$o) {
-                $o['price'] = (float)$o['price'];
-                $o['available'] = (bool)$o['available'];
-                $o['isDefault'] = (bool)$o['is_default'];
-                $o['priceType'] = $o['price_type'];
-            }
-            $grp['options'] = $opts;
-        }
-        $prod['optionGroups'] = $groups;
+function requireAdminAuth(): array {
+    $token = getBearerOrCookieToken();
+    if (!$token) {
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Unauthorized: Admin authentication required']);
+        exit;
     }
 
-    echo json_encode(['success' => true, 'products' => $products]);
+    $sessions = FileStore::get('sessions', []);
+    if (!isset($sessions[$token])) {
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Invalid or expired admin session']);
+        exit;
+    }
+
+    $session = $sessions[$token];
+    if (isset($session['expiresAt']) && time() > $session['expiresAt']) {
+        unset($sessions[$token]);
+        FileStore::saveRaw('sessions', $sessions);
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Session expired. Please log in again.']);
+        exit;
+    }
+
+    // Extend session
+    $sessions[$token]['expiresAt'] = time() + (12 * 3600);
+    FileStore::saveRaw('sessions', $sessions);
+
+    return $session;
+}
+
+function addAuditLog(string $action, string $details, string $adminUsername = 'System'): void {
+    FileStore::create('audit_logs', [
+        'id' => 'log-' . time() . '-' . bin2hex(random_bytes(3)),
+        'action' => $action,
+        'details' => $details,
+        'adminUsername' => $adminUsername,
+        'ipAddress' => $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1',
+        'createdAt' => date('c')
+    ]);
+}
+
+// ==============================================================================
+// 1. HEALTH & SYSTEM STATUS
+// ==============================================================================
+if (preg_match('#^/health/?$#', $route)) {
+    echo json_encode([
+        'success' => true,
+        'status' => 'ok',
+        'engine' => 'JSON FileStore (Databaseless)',
+        'timestamp' => time()
+    ]);
     exit;
 }
 
 // ==============================================================================
-// 2. CATEGORIES API
+// 2. MODULES API (Food, Grocery, Pharmacy, Cosmetics, Stationery)
+// ==============================================================================
+if (preg_match('#^/modules/?$#', $route) && $method === 'GET') {
+    $modules = FileStore::get('modules', []);
+    usort($modules, fn($a, $b) => ($a['order'] ?? 0) <=> ($b['order'] ?? 0));
+    echo json_encode(['success' => true, 'modules' => $modules]);
+    exit;
+}
+
+if (preg_match('#^/admin/modules/?$#', $route) && $method === 'POST') {
+    $admin = requireAdminAuth();
+    $modules = $input['modules'] ?? [];
+    FileStore::saveRaw('modules', $modules);
+    addAuditLog('UPDATE_MODULES', 'Updated multi-service modules configuration', $admin['username']);
+    echo json_encode(['success' => true, 'modules' => $modules]);
+    exit;
+}
+
+// ==============================================================================
+// 3. CATEGORIES API
 // ==============================================================================
 if (preg_match('#^/categories/?$#', $route) && $method === 'GET') {
-    $stmt = $pdo->query("SELECT * FROM `categories` WHERE `active` = 1 ORDER BY `sort_order` ASC");
-    $categories = $stmt->fetchAll();
+    $categories = FileStore::get('categories', []);
+    $moduleId = $_GET['moduleId'] ?? null;
+    if ($moduleId) {
+        $categories = array_values(array_filter($categories, fn($c) => ($c['moduleId'] ?? 'food') === $moduleId));
+    }
+    usort($categories, fn($a, $b) => ($a['order'] ?? 0) <=> ($b['order'] ?? 0));
+    echo json_encode(['success' => true, 'categories' => $categories]);
+    exit;
+}
+
+if (preg_match('#^/admin/categories/?$#', $route) && $method === 'POST') {
+    $admin = requireAdminAuth();
+    $categories = $input['categories'] ?? [];
+    FileStore::saveRaw('categories', $categories);
+    addAuditLog('UPDATE_CATEGORIES', 'Updated product categories', $admin['username']);
     echo json_encode(['success' => true, 'categories' => $categories]);
     exit;
 }
 
 // ==============================================================================
-// 3. STORE SETTINGS & PAYMENT SETTINGS
+// 4. PRODUCTS API
 // ==============================================================================
-if (preg_match('#^/payment-settings/?$#', $route) && $method === 'GET') {
-    $stmt = $pdo->prepare("SELECT `setting_value` FROM `site_settings` WHERE `setting_key` = 'payment_settings'");
-    $stmt->execute();
-    $row = $stmt->fetch();
-    $paymentSettings = $row ? json_decode($row['setting_value'], true) : [];
-    echo json_encode(['success' => true, 'paymentSettings' => $paymentSettings]);
+if (preg_match('#^/products/?$#', $route) && $method === 'GET') {
+    $products = FileStore::get('products', []);
+    $search = strtolower(trim($_GET['search'] ?? ''));
+    $category = $_GET['category'] ?? null;
+    $moduleId = $_GET['moduleId'] ?? null;
+
+    if ($search !== '') {
+        $products = array_filter($products, function ($p) use ($search) {
+            return str_contains(strtolower($p['name'] ?? ''), $search) ||
+                   str_contains(strtolower($p['description'] ?? ''), $search) ||
+                   str_contains(strtolower($p['subtitle'] ?? ''), $search);
+        });
+    }
+
+    if ($category && $category !== 'All' && $category !== 'all') {
+        $products = array_filter($products, fn($p) => ($p['categoryId'] ?? '') === $category);
+    }
+
+    $products = array_values($products);
+    usort($products, fn($a, $b) => ($a['sortOrder'] ?? 0) <=> ($b['sortOrder'] ?? 0));
+
+    echo json_encode(['success' => true, 'products' => $products]);
     exit;
 }
 
-if (preg_match('#^/settings/?$#', $route) && $method === 'GET') {
-    $stmt = $pdo->prepare("SELECT `setting_key`, `setting_value` FROM `site_settings`");
-    $stmt->execute();
-    $rows = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-    
-    $storeInfo = isset($rows['store_info']) ? json_decode($rows['store_info'], true) : [];
-    $paymentSettings = isset($rows['payment_settings']) ? json_decode($rows['payment_settings'], true) : [];
-    $storeInfo['paymentSettings'] = $paymentSettings;
+// Create/Update Product (Admin)
+if (preg_match('#^/admin/products/?$#', $route) && $method === 'POST') {
+    $admin = requireAdminAuth();
+    $productData = $input;
+    if (empty($productData['name'])) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Product name is required']);
+        exit;
+    }
 
-    echo json_encode(['success' => true, 'settings' => $storeInfo]);
+    $id = $productData['id'] ?? ('prod-' . time() . '-' . bin2hex(random_bytes(3)));
+    $productData['id'] = $id;
+    $productData['price'] = (float)($productData['price'] ?? 0);
+    $productData['rating'] = (float)($productData['rating'] ?? 5.0);
+    $productData['available'] = (bool)($productData['available'] ?? true);
+    $productData['updatedAt'] = date('c');
+
+    $saved = FileStore::upsert('products', $id, $productData);
+    addAuditLog('SAVE_PRODUCT', 'Created/Updated product: ' . $productData['name'], $admin['username']);
+
+    echo json_encode(['success' => true, 'product' => $saved]);
     exit;
 }
 
-// Delivery Settings API
-if (preg_match('#^/delivery-settings/?$#', $route) && $method === 'GET') {
-    $stmt = $pdo->prepare("SELECT `setting_value` FROM `site_settings` WHERE `setting_key` = 'delivery_settings'");
-    $stmt->execute();
-    $row = $stmt->fetch();
-    $deliverySettings = $row ? json_decode($row['setting_value'], true) : [
-        'deliveryFee' => 2.00,
-        'freeDeliveryThreshold' => 50.00,
-        'estimatedDeliveryTime' => '25-35 mins',
-        'isDeliveryEnabled' => true,
-        'minimumOrderAmount' => 5.00,
-        'taxRate' => 0.08
-    ];
-    echo json_encode(['success' => true, 'deliverySettings' => $deliverySettings]);
+// Delete Product (Admin)
+if (preg_match('#^/admin/products/([a-zA-Z0-9_\-]+)/?$#', $route, $matches) && $method === 'DELETE') {
+    $admin = requireAdminAuth();
+    $productId = $matches[1];
+    $deleted = FileStore::delete('products', $productId);
+    addAuditLog('DELETE_PRODUCT', 'Deleted product ID: ' . $productId, $admin['username']);
+    echo json_encode(['success' => $deleted]);
     exit;
 }
 
-// Curries API
+// ==============================================================================
+// 5. CURRIES & SALNA API
+// ==============================================================================
 if (preg_match('#^/curries/?$#', $route) && $method === 'GET') {
-    $stmt = $pdo->prepare("SELECT `setting_value` FROM `site_settings` WHERE `setting_key` = 'curries_data'");
-    $stmt->execute();
-    $row = $stmt->fetch();
-    $curries = $row ? json_decode($row['setting_value'], true) : [];
+    $curries = FileStore::get('curries', []);
     echo json_encode(['success' => true, 'curries' => $curries]);
     exit;
 }
 
-// Custom Order Sections API
+if (preg_match('#^/admin/curries/?$#', $route) && $method === 'POST') {
+    $admin = requireAdminAuth();
+    $curries = $input['curries'] ?? [];
+    FileStore::saveRaw('curries', $curries);
+    addAuditLog('UPDATE_CURRIES', 'Updated curries / salna options', $admin['username']);
+    echo json_encode(['success' => true, 'curries' => $curries]);
+    exit;
+}
+
+// ==============================================================================
+// 6. CUSTOM ORDER SECTIONS API
+// ==============================================================================
 if (preg_match('#^/custom-order-sections/?$#', $route) && $method === 'GET') {
-    $stmt = $pdo->prepare("SELECT `setting_value` FROM `site_settings` WHERE `setting_key` = 'custom_order_sections'");
-    $stmt->execute();
-    $row = $stmt->fetch();
-    $sections = $row ? json_decode($row['setting_value'], true) : [];
+    $sections = FileStore::get('custom_order_sections', []);
+    echo json_encode(['success' => true, 'sections' => $sections]);
+    exit;
+}
+
+if (preg_match('#^/admin/custom-order-sections/?$#', $route) && $method === 'POST') {
+    $admin = requireAdminAuth();
+    $sections = $input['sections'] ?? [];
+    FileStore::saveRaw('custom_order_sections', $sections);
+    addAuditLog('UPDATE_CUSTOM_ORDER_SECTIONS', 'Updated custom order sections', $admin['username']);
     echo json_encode(['success' => true, 'sections' => $sections]);
     exit;
 }
 
 // ==============================================================================
-// 4. ORDERS API (Create Order & List Orders)
+// 7. SETTINGS & PAYMENT SETTINGS API
 // ==============================================================================
-if (preg_match('#^/orders/?$#', $route) && $method === 'POST') {
-    $orderNumber = $input['orderNumber'] ?? ('FD-' . strtoupper(substr(uniqid(), -6)));
-    $orderId = 'ord-' . time() . '-' . rand(100, 999);
-    
-    $customerName = trim($input['customerName'] ?? 'Customer');
-    $customerEmail = trim($input['customerEmail'] ?? 'customer@example.com');
-    $customerPhone = trim($input['customerPhone'] ?? '+91 9876543210');
-    $deliveryAddress = trim($input['deliveryAddress'] ?? 'Kochi, Kerala');
-
-    $subtotal = floatval($input['subtotal'] ?? 0);
-    $tax = floatval($input['tax'] ?? 0);
-    $deliveryFee = floatval($input['deliveryFee'] ?? 0);
-    $total = floatval($input['total'] ?? 0);
-    $paymentMethod = $input['paymentMethod'] ?? 'Cash on Delivery';
-    $paymentStatus = $input['paymentStatus'] ?? 'Pending';
-    $orderStatus = 'Confirmed';
-    $notes = $input['notes'] ?? '';
-
-    $pdo->beginTransaction();
-    try {
-        $stmt = $pdo->prepare("
-            INSERT INTO `orders` (`id`, `order_number`, `customer_name`, `customer_email`, `customer_phone`, `delivery_address`, `subtotal`, `tax`, `delivery_fee`, `total`, `payment_method`, `payment_status`, `order_status`, `notes`, `created_at`)
-            VALUES (:id, :num, :cname, :cemail, :cphone, :addr, :subtotal, :tax, :fee, :total, :pmethod, :pstatus, :ostatus, :notes, NOW())
-        ");
-        $stmt->execute([
-            ':id' => $orderId,
-            ':num' => $orderNumber,
-            ':cname' => $customerName,
-            ':cemail' => $customerEmail,
-            ':cphone' => $customerPhone,
-            ':addr' => $deliveryAddress,
-            ':subtotal' => $subtotal,
-            ':tax' => $tax,
-            ':fee' => $deliveryFee,
-            ':total' => $total,
-            ':pmethod' => $paymentMethod,
-            ':pstatus' => $paymentStatus,
-            ':ostatus' => $orderStatus,
-            ':notes' => $notes,
-        ]);
-
-        // Insert Order Items
-        if (!empty($input['items']) && is_array($input['items'])) {
-            $itemStmt = $pdo->prepare("
-                INSERT INTO `order_items` (`id`, `order_id`, `product_id`, `product_name`, `product_image`, `quantity`, `unit_price`, `total_price`, `customization_json`)
-                VALUES (:id, :order_id, :pid, :pname, :pimg, :qty, :uprice, :tprice, :cjson)
-            ");
-            foreach ($input['items'] as $idx => $item) {
-                $itemStmt->execute([
-                    ':id' => 'item-' . time() . '-' . $idx,
-                    ':order_id' => $orderId,
-                    ':pid' => $item['productId'] ?? null,
-                    ':pname' => $item['name'] ?? 'Product',
-                    ':pimg' => $item['image'] ?? '',
-                    ':qty' => intval($item['quantity'] ?? 1),
-                    ':uprice' => floatval($item['price'] ?? 0),
-                    ':tprice' => floatval(($item['price'] ?? 0) * ($item['quantity'] ?? 1)),
-                    ':cjson' => json_encode($item['customization'] ?? null),
-                ]);
-            }
-        }
-
-        $pdo->commit();
-        echo json_encode([
-            'success' => true,
-            'order' => [
-                'id' => $orderId,
-                'orderNumber' => $orderNumber,
-                'total' => $total,
-                'status' => $orderStatus,
-            ]
-        ]);
-    } catch (Exception $e) {
-        $pdo->rollBack();
-        http_response_code(500);
-        echo json_encode(['success' => false, 'error' => 'Failed to place order: ' . $e->getMessage()]);
-    }
+if (preg_match('#^/settings/?$#', $route) && $method === 'GET') {
+    $settings = FileStore::get('settings', []);
+    $paymentSettings = FileStore::get('payment_settings', []);
+    $settings['paymentSettings'] = $paymentSettings;
+    echo json_encode(['success' => true, 'settings' => $settings]);
     exit;
 }
 
-if (preg_match('#^/orders/?$#', $route) && $method === 'GET') {
-    $stmt = $pdo->query("SELECT * FROM `orders` ORDER BY `created_at` DESC LIMIT 100");
-    $orders = $stmt->fetchAll();
-
-    foreach ($orders as &$ord) {
-        $ord['subtotal'] = (float)$ord['subtotal'];
-        $ord['tax'] = (float)$ord['tax'];
-        $ord['deliveryFee'] = (float)$ord['delivery_fee'];
-        $ord['total'] = (float)$ord['total'];
-        $ord['orderNumber'] = $ord['order_number'];
-        $ord['customerName'] = $ord['customer_name'];
-        $ord['customerEmail'] = $ord['customer_email'];
-        $ord['customerPhone'] = $ord['customer_phone'];
-        $ord['deliveryAddress'] = $ord['delivery_address'];
-        $ord['paymentMethod'] = $ord['payment_method'];
-        $ord['paymentStatus'] = $ord['payment_status'];
-        $ord['orderStatus'] = $ord['order_status'];
-
-        $itemStmt = $pdo->prepare("SELECT * FROM `order_items` WHERE `order_id` = :oid");
-        $itemStmt->execute([':oid' => $ord['id']]);
-        $items = $itemStmt->fetchAll();
-        foreach ($items as &$itm) {
-            $itm['unitPrice'] = (float)$itm['unit_price'];
-            $itm['totalPrice'] = (float)$itm['total_price'];
-            $itm['quantity'] = (int)$itm['quantity'];
-            $itm['customization'] = json_decode($itm['customization_json'] ?? 'null', true);
-        }
-        $ord['items'] = $items;
+if (preg_match('#^/admin/settings/?$#', $route) && $method === 'POST') {
+    $admin = requireAdminAuth();
+    $settings = $input['settings'] ?? $input;
+    if (isset($settings['paymentSettings'])) {
+        FileStore::saveRaw('payment_settings', $settings['paymentSettings']);
+        unset($settings['paymentSettings']);
     }
+    FileStore::saveRaw('settings', $settings);
+    addAuditLog('UPDATE_SETTINGS', 'Updated store configuration', $admin['username']);
+    echo json_encode(['success' => true, 'settings' => $settings]);
+    exit;
+}
 
+if (preg_match('#^/delivery-settings/?$#', $route) && $method === 'GET') {
+    $deliverySettings = FileStore::get('delivery_settings', []);
+    echo json_encode(['success' => true, 'deliverySettings' => $deliverySettings]);
+    exit;
+}
+
+if (preg_match('#^/admin/delivery-settings/?$#', $route) && $method === 'POST') {
+    $admin = requireAdminAuth();
+    $deliverySettings = $input['deliverySettings'] ?? $input;
+    FileStore::saveRaw('delivery_settings', $deliverySettings);
+    addAuditLog('UPDATE_DELIVERY_SETTINGS', 'Updated delivery timings and fee thresholds', $admin['username']);
+    echo json_encode(['success' => true, 'deliverySettings' => $deliverySettings]);
+    exit;
+}
+
+// ==============================================================================
+// 8. ORDERS API (Create, List, Update Status)
+// ==============================================================================
+if (preg_match('#^/orders/?$#', $route) && $method === 'GET') {
+    $orders = FileStore::get('orders', []);
+    usort($orders, fn($a, $b) => strcmp($b['createdAt'] ?? '', $a['createdAt'] ?? ''));
     echo json_encode(['success' => true, 'orders' => $orders]);
     exit;
 }
 
-// ==============================================================================
-// 5. CUSTOMER SUPPORT & VOICE NOTES API
-// ==============================================================================
-if (preg_match('#^/support/?$#', $route) && $method === 'GET') {
-    $email = $_GET['email'] ?? 'customer@example.com';
-    $stmt = $pdo->prepare("SELECT * FROM `support_conversations` WHERE `customer_email` = :email ORDER BY `updated_at` DESC LIMIT 1");
-    $stmt->execute([':email' => $email]);
-    $conv = $stmt->fetch();
+if (preg_match('#^/orders/?$#', $route) && $method === 'POST') {
+    $items = $input['items'] ?? [];
+    $subtotal = (float)($input['subtotal'] ?? 0);
+    $taxes = (float)($input['taxes'] ?? 0.3);
+    $deliveryFees = (float)($input['deliveryFees'] ?? 1.5);
+    $total = (float)($input['total'] ?? ($subtotal + $taxes + $deliveryFees));
+    $paymentMethod = $input['paymentMethod'] ?? 'Cash on Delivery';
+    $customerName = $input['customerName'] ?? 'Guest Customer';
 
-    $messages = [];
-    if ($conv) {
-        $msgStmt = $pdo->prepare("SELECT * FROM `support_messages` WHERE `conversation_id` = :cid ORDER BY `timestamp_ms` ASC");
-        $msgStmt->execute([':cid' => $conv['id']]);
-        $rawMsgs = $msgStmt->fetchAll();
-        foreach ($rawMsgs as $m) {
-            $messages[] = [
-                'id' => $m['id'],
-                'sender' => $m['sender'],
-                'senderName' => $m['sender_name'],
-                'messageType' => $m['message_type'],
-                'text' => $m['text'],
-                'audioUrl' => $m['audio_url'],
-                'audioDuration' => (float)$m['audio_duration'],
-                'imageUrl' => $m['image_url'],
-                'time' => $m['time_str'],
-                'timestamp' => (int)$m['timestamp_ms'],
-                'isRead' => (bool)$m['is_read'],
-            ];
+    $orderNumber = '#FG-' . rand(10000, 99999);
+    $orderId = 'order-' . time() . '-' . bin2hex(random_bytes(3));
+
+    $order = [
+        'id' => $orderId,
+        'orderNumber' => $orderNumber,
+        'date' => 'Just now',
+        'customerName' => $customerName,
+        'customerEmail' => $input['customerEmail'] ?? 'customer@example.com',
+        'customerPhone' => $input['customerPhone'] ?? '+91 9876543210',
+        'deliveryAddress' => $input['deliveryAddress'] ?? 'Calicut, Kerala',
+        'items' => $items,
+        'subtotal' => $subtotal,
+        'taxes' => $taxes,
+        'deliveryFees' => $deliveryFees,
+        'total' => $total,
+        'estimatedDelivery' => $input['estimatedDelivery'] ?? '15 - 30mins',
+        'paymentMethod' => $paymentMethod,
+        'status' => 'In Transit',
+        'createdAt' => date('c')
+    ];
+
+    FileStore::create('orders', $order);
+
+    // Record Payment
+    FileStore::create('payments', [
+        'id' => 'pay-' . time() . '-' . bin2hex(random_bytes(3)),
+        'orderId' => $orderId,
+        'orderNumber' => $orderNumber,
+        'customerName' => $customerName,
+        'amount' => $total,
+        'paymentMethod' => $paymentMethod,
+        'status' => ($paymentMethod === 'Cash on Delivery' ? 'Pending' : 'Paid'),
+        'date' => date('Y-m-d H:i'),
+        'createdAt' => date('c')
+    ]);
+
+    echo json_encode(['success' => true, 'order' => $order]);
+    exit;
+}
+
+if (preg_match('#^/admin/orders/([a-zA-Z0-9_\-]+)/status/?$#', $route, $matches) && $method === 'PATCH') {
+    $admin = requireAdminAuth();
+    $orderId = $matches[1];
+    $newStatus = $input['status'] ?? 'Delivered';
+
+    $updated = FileStore::update('orders', $orderId, ['status' => $newStatus]);
+    addAuditLog('UPDATE_ORDER_STATUS', "Changed order #{$orderId} status to {$newStatus}", $admin['username']);
+
+    echo json_encode(['success' => true, 'order' => $updated]);
+    exit;
+}
+
+// ==============================================================================
+// 9. ADMIN AUTHENTICATION API
+// ==============================================================================
+if (preg_match('#^/admin/login/?$#', $route) && $method === 'POST') {
+    $username = trim($input['username'] ?? '');
+    $password = (string)($input['password'] ?? '');
+
+    $users = FileStore::get('users', []);
+    $matchedUser = null;
+
+    foreach ($users as $u) {
+        if (strcasecmp($u['username'] ?? '', $username) === 0 || strcasecmp($u['email'] ?? '', $username) === 0) {
+            $matchedUser = $u;
+            break;
         }
     }
 
+    if (!$matchedUser || !password_verify($password, $matchedUser['passwordHash'])) {
+        addAuditLog('FAILED_LOGIN', "Failed login attempt for username: {$username}", 'Anonymous');
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Invalid username or password']);
+        exit;
+    }
+
+    $token = 'sess_' . bin2hex(random_bytes(32));
+    $sessions = FileStore::get('sessions', []);
+    $sessions[$token] = [
+        'token' => $token,
+        'userId' => $matchedUser['id'],
+        'username' => $matchedUser['username'],
+        'name' => $matchedUser['name'],
+        'role' => $matchedUser['role'] ?? 'Super Administrator',
+        'createdAt' => time(),
+        'expiresAt' => time() + (12 * 3600)
+    ];
+    FileStore::saveRaw('sessions', $sessions);
+
+    setcookie('foodgo_admin_token', $token, [
+        'expires' => time() + (12 * 3600),
+        'path' => '/',
+        'httponly' => false,
+        'samesite' => 'Lax'
+    ]);
+
+    addAuditLog('ADMIN_LOGIN', "Admin {$matchedUser['username']} logged in successfully", $matchedUser['username']);
+
     echo json_encode([
         'success' => true,
-        'conversation' => $conv,
-        'messages' => $messages,
-        'unreadCount' => $conv ? (int)$conv['unread_count_customer'] : 0,
+        'token' => $token,
+        'user' => [
+            'username' => $matchedUser['username'],
+            'name' => $matchedUser['name'],
+            'role' => $matchedUser['role'] ?? 'Super Administrator'
+        ]
     ]);
     exit;
 }
 
-if (preg_match('#^/support/?$#', $route) && $method === 'POST') {
-    $sender = $input['sender'] ?? 'user';
-    $senderName = $input['senderName'] ?? 'Customer';
-    $customerEmail = $input['customerEmail'] ?? 'customer@example.com';
-    $text = $input['text'] ?? '';
-    $messageType = $input['messageType'] ?? 'text';
-    $audioUrl = $input['audioUrl'] ?? null;
-    $audioDuration = isset($input['audioDuration']) ? floatval($input['audioDuration']) : null;
-    $orderNumber = $input['orderNumber'] ?? null;
-    $timeStr = date('g:i A');
-    $timestampMs = round(microtime(true) * 1000);
-
-    // Find or create conversation
-    $stmt = $pdo->prepare("SELECT * FROM `support_conversations` WHERE `customer_email` = :email LIMIT 1");
-    $stmt->execute([':email' => $customerEmail]);
-    $conv = $stmt->fetch();
-
-    $pdo->beginTransaction();
-    try {
-        if (!$conv) {
-            $convId = 'conv-' . time() . '-' . rand(100, 999);
-            $cStmt = $pdo->prepare("
-                INSERT INTO `support_conversations` (`id`, `customer_name`, `customer_email`, `customer_avatar`, `order_number`, `status`, `last_message`, `unread_count_admin`, `created_at`, `updated_at`)
-                VALUES (:id, :name, :email, :avatar, :order_num, 'Open', :last_msg, 1, NOW(), NOW())
-            ");
-            $cStmt->execute([
-                ':id' => $convId,
-                ':name' => $senderName,
-                ':email' => $customerEmail,
-                ':avatar' => 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
-                ':order_num' => $orderNumber,
-                ':last_msg' => $messageType === 'audio' ? '🎤 Voice message' : $text,
-            ]);
-        } else {
-            $convId = $conv['id'];
-            $uStmt = $pdo->prepare("
-                UPDATE `support_conversations`
-                SET `last_message` = :last_msg, `status` = 'Open', `unread_count_admin` = `unread_count_admin` + 1, `updated_at` = NOW()
-                WHERE `id` = :id
-            ");
-            $uStmt->execute([
-                ':last_msg' => $messageType === 'audio' ? '🎤 Voice message' : $text,
-                ':id' => $convId,
-            ]);
-        }
-
-        // Insert message
-        $msgId = 'msg-' . time() . '-' . rand(1000, 9999);
-        $mStmt = $pdo->prepare("
-            INSERT INTO `support_messages` (`id`, `conversation_id`, `sender`, `sender_name`, `message_type`, `text`, `audio_url`, `audio_duration`, `time_str`, `timestamp_ms`, `created_at`)
-            VALUES (:id, :cid, :sender, :sname, :mtype, :text, :aurl, :adur, :tstr, :tms, NOW())
-        ");
-        $mStmt->execute([
-            ':id' => $msgId,
-            ':cid' => $convId,
-            ':sender' => $sender,
-            ':sname' => $senderName,
-            ':mtype' => $messageType,
-            ':text' => $text,
-            ':aurl' => $audioUrl,
-            ':adur' => $audioDuration,
-            ':tstr' => $timeStr,
-            ':tms' => $timestampMs,
-        ]);
-
-        $pdo->commit();
-        echo json_encode([
-            'success' => true,
-            'message' => [
-                'id' => $msgId,
-                'sender' => $sender,
-                'senderName' => $senderName,
-                'messageType' => $messageType,
-                'text' => $text,
-                'audioUrl' => $audioUrl,
-                'audioDuration' => $audioDuration,
-                'time' => $timeStr,
-                'timestamp' => $timestampMs,
-            ]
-        ]);
-    } catch (Exception $e) {
-        $pdo->rollBack();
-        http_response_code(500);
-        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
-    }
+if (preg_match('#^/admin/me/?$#', $route) && $method === 'GET') {
+    $session = requireAdminAuth();
+    echo json_encode([
+        'success' => true,
+        'user' => [
+            'username' => $session['username'],
+            'name' => $session['name'],
+            'role' => $session['role']
+        ]
+    ]);
     exit;
 }
 
-// ==============================================================================
-// 6. ADMIN AUTHENTICATION
-// ==============================================================================
-if (preg_match('#^/admin/login/?$#', $route) && $method === 'POST') {
-    $username = trim($input['username'] ?? '');
-    $password = $input['password'] ?? '';
-
-    $stmt = $pdo->prepare("SELECT * FROM `admins` WHERE `username` = :u OR `email` = :u LIMIT 1");
-    $stmt->execute([':u' => $username]);
-    $admin = $stmt->fetch();
-
-    if ($admin && password_verify($password, $admin['password_hash'])) {
-        $token = bin2hex(random_bytes(32));
-        $expiresAt = date('Y-m-d H:i:s', time() + 86400 * 7);
-
-        $sStmt = $pdo->prepare("INSERT INTO `admin_sessions` (`token`, `admin_id`, `username`, `expires_at`) VALUES (:t, :aid, :u, :exp)");
-        $sStmt->execute([
-            ':t' => $token,
-            ':aid' => $admin['id'],
-            ':u' => $admin['username'],
-            ':exp' => $expiresAt,
-        ]);
-
-        setcookie('foodgo_admin_token', $token, [
-            'expires' => time() + 86400 * 7,
-            'path' => '/',
-            'httponly' => true,
-            'samesite' => 'Lax',
-        ]);
-
-        echo json_encode([
-            'success' => true,
-            'admin' => [
-                'username' => $admin['username'],
-                'name' => $admin['name'],
-                'role' => $admin['role'],
-                'email' => $admin['email'],
-            ],
-            'token' => $token,
-        ]);
-    } else {
-        http_response_code(401);
-        echo json_encode(['success' => false, 'error' => 'Invalid admin username or password.']);
-    }
-    exit;
-}
-
-// Admin logout
 if (preg_match('#^/admin/logout/?$#', $route) && $method === 'POST') {
-    $token = $_COOKIE['foodgo_admin_token'] ?? '';
+    $token = getBearerOrCookieToken();
     if ($token) {
-        $stmt = $pdo->prepare("DELETE FROM `admin_sessions` WHERE `token` = :t");
-        $stmt->execute([':t' => $token]);
+        $sessions = FileStore::get('sessions', []);
+        unset($sessions[$token]);
+        FileStore::saveRaw('sessions', $sessions);
     }
     setcookie('foodgo_admin_token', '', ['expires' => time() - 3600, 'path' => '/']);
     echo json_encode(['success' => true]);
@@ -470,30 +453,237 @@ if (preg_match('#^/admin/logout/?$#', $route) && $method === 'POST') {
 }
 
 // ==============================================================================
-// 7. ADMIN DASHBOARD STATS
+// 10. ADMIN DASHBOARD STATS
 // ==============================================================================
 if (preg_match('#^/admin/dashboard/?$#', $route) && $method === 'GET') {
-    $revStmt = $pdo->query("SELECT COALESCE(SUM(`total`), 0) as `total_revenue`, COUNT(*) as `total_orders` FROM `orders`");
-    $revData = $revStmt->fetch();
+    $orders = FileStore::get('orders', []);
+    $customers = FileStore::get('customers', []);
+    $products = FileStore::get('products', []);
 
-    $custStmt = $pdo->query("SELECT COUNT(DISTINCT `customer_email`) as `total_customers` FROM `orders`");
-    $custData = $custStmt->fetch();
-
-    $recStmt = $pdo->query("SELECT * FROM `orders` ORDER BY `created_at` DESC LIMIT 6");
-    $recentOrders = $recStmt->fetchAll();
+    $totalRevenue = array_reduce($orders, fn($sum, $o) => $sum + ($o['total'] ?? 0), 0);
+    $recentOrders = array_slice($orders, 0, 8);
 
     echo json_encode([
         'success' => true,
         'stats' => [
-            'totalRevenue' => (float)$revData['total_revenue'],
-            'totalOrders' => (int)$revData['total_orders'],
-            'totalCustomers' => (int)$custData['total_customers'],
-            'recentOrders' => $recentOrders,
+            'totalRevenue' => (float)$totalRevenue,
+            'totalOrders' => count($orders),
+            'totalCustomers' => count($customers),
+            'totalProducts' => count($products),
+            'recentOrders' => $recentOrders
         ]
     ]);
     exit;
 }
 
-// Default Fallback
+// ==============================================================================
+// 11. AUDIT LOGS, PAYMENTS, CUSTOMERS, STORES, RIDERS, MERCHANTS
+// ==============================================================================
+if (preg_match('#^/admin/audit-logs/?$#', $route) && $method === 'GET') {
+    $admin = requireAdminAuth();
+    $logs = FileStore::get('audit_logs', []);
+    usort($logs, fn($a, $b) => strcmp($b['createdAt'] ?? '', $a['createdAt'] ?? ''));
+    echo json_encode(['success' => true, 'logs' => array_slice($logs, 0, 100)]);
+    exit;
+}
+
+if (preg_match('#^/admin/payments/?$#', $route) && $method === 'GET') {
+    $admin = requireAdminAuth();
+    $payments = FileStore::get('payments', []);
+    usort($payments, fn($a, $b) => strcmp($b['createdAt'] ?? '', $a['createdAt'] ?? ''));
+    echo json_encode(['success' => true, 'payments' => $payments]);
+    exit;
+}
+
+if (preg_match('#^/admin/customers/?$#', $route) && $method === 'GET') {
+    $admin = requireAdminAuth();
+    $customers = FileStore::get('customers', []);
+    echo json_encode(['success' => true, 'customers' => $customers]);
+    exit;
+}
+
+if (preg_match('#^/stores/?$#', $route) && $method === 'GET') {
+    $stores = FileStore::get('stores', []);
+    echo json_encode(['success' => true, 'stores' => $stores]);
+    exit;
+}
+
+if (preg_match('#^/merchants/?$#', $route) && $method === 'GET') {
+    $merchants = FileStore::get('merchants', []);
+    echo json_encode(['success' => true, 'merchants' => $merchants]);
+    exit;
+}
+
+if (preg_match('#^/delivery/?$#', $route) && $method === 'GET') {
+    $deliveryPartners = FileStore::get('delivery_partners', []);
+    echo json_encode(['success' => true, 'deliveryPartners' => $deliveryPartners]);
+    exit;
+}
+
+// ==============================================================================
+// 12. CHAT & LIVE CUSTOMER SUPPORT API
+// ==============================================================================
+if (preg_match('#^/support/?$#', $route) && $method === 'GET') {
+    $email = $_GET['email'] ?? 'customer@example.com';
+    $name = $_GET['name'] ?? 'Customer';
+
+    $conversations = FileStore::get('support_conversations', []);
+    $found = null;
+
+    foreach ($conversations as $c) {
+        if (($c['customerEmail'] ?? '') === $email) {
+            $found = $c;
+            break;
+        }
+    }
+
+    if (!$found) {
+        $found = [
+            'id' => 'conv-' . time() . '-' . bin2hex(random_bytes(3)),
+            'customerName' => $name,
+            'customerEmail' => $email,
+            'customerAvatar' => 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80',
+            'status' => 'Open',
+            'lastMessage' => 'Hello! Welcome to Foodgo Gourmet Support.',
+            'unreadCountCustomer' => 0,
+            'unreadCountAdmin' => 0,
+            'updatedAt' => date('c'),
+            'messages' => [
+                [
+                    'id' => 'msg-welcome',
+                    'sender' => 'agent',
+                    'text' => 'Hello! Welcome to Foodgo Gourmet Support. How can we help you today?',
+                    'time' => date('h:i A'),
+                    'timestamp' => time() * 1000
+                ]
+            ]
+        ];
+        FileStore::create('support_conversations', $found);
+    }
+
+    echo json_encode([
+        'success' => true,
+        'conversation' => $found,
+        'messages' => $found['messages'] ?? [],
+        'unreadCountCustomer' => $found['unreadCountCustomer'] ?? 0
+    ]);
+    exit;
+}
+
+// Send support message
+if (preg_match('#^/support/message/?$#', $route) && $method === 'POST') {
+    $email = $input['email'] ?? 'customer@example.com';
+    $sender = $input['sender'] ?? 'user';
+    $text = trim($input['text'] ?? '');
+    $audioUrl = $input['audioUrl'] ?? null;
+    $duration = (float)($input['duration'] ?? 0);
+
+    $conversations = FileStore::get('support_conversations', []);
+    $updatedConv = null;
+
+    foreach ($conversations as $idx => $conv) {
+        if (($conv['customerEmail'] ?? '') === $email) {
+            $newMsg = [
+                'id' => 'msg-' . time() . '-' . bin2hex(random_bytes(3)),
+                'sender' => $sender,
+                'text' => $text,
+                'audioUrl' => $audioUrl,
+                'duration' => $duration,
+                'time' => date('h:i A'),
+                'timestamp' => time() * 1000
+            ];
+            $conv['messages'][] = $newMsg;
+            $conv['lastMessage'] = !empty($text) ? $text : '🎤 Voice message (' . round($duration) . 's)';
+            $conv['updatedAt'] = date('c');
+
+            if ($sender === 'user') {
+                $conv['unreadCountAdmin'] = ($conv['unreadCountAdmin'] ?? 0) + 1;
+            } else {
+                $conv['unreadCountCustomer'] = ($conv['unreadCountCustomer'] ?? 0) + 1;
+            }
+
+            $conversations[$idx] = $conv;
+            $updatedConv = $conv;
+            break;
+        }
+    }
+
+    if ($updatedConv) {
+        FileStore::saveRaw('support_conversations', $conversations);
+    }
+
+    echo json_encode(['success' => true, 'conversation' => $updatedConv]);
+    exit;
+}
+
+// ==============================================================================
+// 13. SECURE FILE UPLOAD API
+// ==============================================================================
+if (preg_match('#^/upload/?$#', $route) && $method === 'POST') {
+    $uploadDir = dirname(__DIR__) . '/uploads';
+    if (!is_dir($uploadDir)) {
+        @mkdir($uploadDir, 0755, true);
+    }
+
+    if (empty($_FILES['file'])) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'No file uploaded']);
+        exit;
+    }
+
+    $file = $_FILES['file'];
+    $allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'audio/webm', 'audio/mp4', 'audio/ogg', 'audio/wav'];
+    
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    $mimeType = finfo_file($finfo, $file['tmp_name']);
+    finfo_close($finfo);
+
+    if (!in_array($mimeType, $allowedTypes)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Invalid file format. Only safe images and audio are allowed.']);
+        exit;
+    }
+
+    $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
+    $safeName = 'upload_' . time() . '_' . bin2hex(random_bytes(6)) . '.' . strtolower($ext);
+    $targetPath = $uploadDir . '/' . $safeName;
+
+    if (move_uploaded_file($file['tmp_name'], $targetPath)) {
+        echo json_encode([
+            'success' => true,
+            'url' => '/uploads/' . $safeName,
+            'filename' => $safeName
+        ]);
+        exit;
+    }
+
+    http_response_code(500);
+    echo json_encode(['success' => false, 'error' => 'Failed to save uploaded file']);
+    exit;
+}
+
+// ==============================================================================
+// 14. BACKUP CREATION & DOWNLOAD (Admin)
+// ==============================================================================
+if (preg_match('#^/admin/backup/?$#', $route) && $method === 'POST') {
+    $admin = requireAdminAuth();
+    $backupFile = FileStore::createBackup();
+    if ($backupFile) {
+        addAuditLog('CREATE_BACKUP', 'Created full JSON FileStore backup archive', $admin['username']);
+        echo json_encode([
+            'success' => true,
+            'backupFile' => basename($backupFile),
+            'downloadUrl' => '/backups/' . basename($backupFile)
+        ]);
+        exit;
+    }
+    http_response_code(500);
+    echo json_encode(['success' => false, 'error' => 'Failed to generate backup']);
+    exit;
+}
+
+// ==============================================================================
+// 404 Fallback
+// ==============================================================================
 http_response_code(404);
 echo json_encode(['success' => false, 'error' => 'Endpoint not found: ' . $route]);

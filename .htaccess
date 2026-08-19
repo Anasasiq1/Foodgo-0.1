@@ -7,10 +7,11 @@
     RewriteBase /
 
     # 1. Protect hidden files, environment files, and sensitive directories
-    RewriteRule ^(\.git|\.env|config/|database/|storage/) - [F,L,NC]
+    RewriteRule ^(\.git|\.env|config/|database/|storage/|data/|backups/) - [F,L,NC]
 
     # 2. Allow direct execution of Installer, Admin Gateway, and Index PHP Gateways
     RewriteRule ^install\.php$ - [L]
+    RewriteRule ^install/(.*)$ install/index.php [QSA,L]
     RewriteRule ^admin\.php$ - [L]
     RewriteRule ^index\.php$ - [L]
 
@@ -18,12 +19,17 @@
     RewriteRule ^api/(.*)$ api/index.php [QSA,L]
     RewriteRule ^api$ api/index.php [QSA,L]
 
-    # 4. If requested resource is an existing file or directory, serve it directly
+    # 4. Route HTML portals
+    RewriteRule ^admin/?$ admin.html [L]
+    RewriteRule ^merchant/?$ merchant.html [L]
+    RewriteRule ^delivery/?$ delivery.html [L]
+
+    # 5. If requested resource is an existing file or directory, serve it directly
     RewriteCond %{REQUEST_FILENAME} -f [OR]
     RewriteCond %{REQUEST_FILENAME} -d
     RewriteRule ^ - [L]
 
-    # 5. SPA Route Fallback:
+    # 6. SPA Route Fallback:
     # If root index.html exists (e.g. built dist contents flattened to website root), serve it
     RewriteCond %{DOCUMENT_ROOT}/index.html -f
     RewriteRule ^ index.html [L]
@@ -41,6 +47,17 @@ Options -Indexes
 
 # Block access to hidden files (.env, .git, etc.)
 <FilesMatch "^\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# Block access to JSON and SQL data files directly
+<FilesMatch "\.(json|sql|lock|log|sh|env)$">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>
