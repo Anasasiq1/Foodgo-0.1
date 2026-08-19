@@ -128,6 +128,43 @@ if (preg_match('#^/settings/?$#', $route) && $method === 'GET') {
     exit;
 }
 
+// Delivery Settings API
+if (preg_match('#^/delivery-settings/?$#', $route) && $method === 'GET') {
+    $stmt = $pdo->prepare("SELECT `setting_value` FROM `site_settings` WHERE `setting_key` = 'delivery_settings'");
+    $stmt->execute();
+    $row = $stmt->fetch();
+    $deliverySettings = $row ? json_decode($row['setting_value'], true) : [
+        'deliveryFee' => 2.00,
+        'freeDeliveryThreshold' => 50.00,
+        'estimatedDeliveryTime' => '25-35 mins',
+        'isDeliveryEnabled' => true,
+        'minimumOrderAmount' => 5.00,
+        'taxRate' => 0.08
+    ];
+    echo json_encode(['success' => true, 'deliverySettings' => $deliverySettings]);
+    exit;
+}
+
+// Curries API
+if (preg_match('#^/curries/?$#', $route) && $method === 'GET') {
+    $stmt = $pdo->prepare("SELECT `setting_value` FROM `site_settings` WHERE `setting_key` = 'curries_data'");
+    $stmt->execute();
+    $row = $stmt->fetch();
+    $curries = $row ? json_decode($row['setting_value'], true) : [];
+    echo json_encode(['success' => true, 'curries' => $curries]);
+    exit;
+}
+
+// Custom Order Sections API
+if (preg_match('#^/custom-order-sections/?$#', $route) && $method === 'GET') {
+    $stmt = $pdo->prepare("SELECT `setting_value` FROM `site_settings` WHERE `setting_key` = 'custom_order_sections'");
+    $stmt->execute();
+    $row = $stmt->fetch();
+    $sections = $row ? json_decode($row['setting_value'], true) : [];
+    echo json_encode(['success' => true, 'sections' => $sections]);
+    exit;
+}
+
 // ==============================================================================
 // 4. ORDERS API (Create Order & List Orders)
 // ==============================================================================
